@@ -10,7 +10,7 @@ class HandleMap(Node):
     def __init__(self):
         super().__init__('handle_map')
         self.get_map_client = self.create_client(GetMap, '/map_server/map')
-        while not self.get_map_client.wait_for_service(timeout_sec=1.0):
+        while not self.get_map_client.wait_for_service(timeout_sec=2.0):
             self.get_logger().info('service not available, waiting again ...')
         self.req = GetMap.Request()
         
@@ -38,7 +38,5 @@ class HandleMap(Node):
             matrix_255 = matrix_100 * 2.55
             matrix_255_int = np.clip(matrix_255, 0, 255).astype(np.uint8)
             cv2.imshow('i', matrix_255_int)
-            cv2.imwrite('my_map.png', matrix_255_int)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            
         
