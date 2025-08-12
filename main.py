@@ -1,20 +1,72 @@
-from fastapi import FastAPI
-from fastapi.responses import FileResponse  # for sending image file to client
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse  # for sending image file to client
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from nav2_msgs.action import DockRobot, UndockRobot
+from nav2_msgs.action import DockRobot, UndockRobot, NavigateToPose
+from geometry_msgs.msg import PoseStamped
 from typing import Any
 import time
 
 from map import HandleMap
 
-
+import asyncio
 from pathlib import Path   # object oriented way of hadling file paths
 
 # global params
 run_dock_loop = True
 docking_request_future = None
+
+class goalAction(Node):
+    def __init__(self):
+        super().__init__('goal_action')
+        self.goal_action_client = ActionClient(
+            self,
+            NavigateToPose,
+            '/agv1/navigate_to_pose'
+        )
+    
+    def send_goal(self):
+        goal_msg = NavigateToPose.Goal()
+
+        # change me!
+        my_pose = PoseStamped()
+        my_pose.header.stamp = self.get_clock().now().to_msg()
+        my_pose.header.frame_id = "map"
+        my_pose.pose.position.x = 0.976
+        my_pose.pose.position.y = -0.004
+        my_pose.pose.orientation.x = 0.0
+        my_pose.pose.orientation.y = -1.0
+        my_pose.pose.orientation.z = 0.0
+        my_pose.pose.orientation.w = 0.0318
+        
+        goal_msg.pose = my_pose
+        goal_msg.behavior_tree = ""
+
+        # sending goal request
+        goal_request_future = self.goal_action_client.send_goal_async(goal_msg)
+        rclpy.spin_until_future_complete(self, goal_request_future)
+        return goal_request_future
+    
+    def get_goal_result(self, future):
+        # get future result whether it got accepted or not
+        client_goal_handle = future.result()   # Now it is instance of ClientGoalHandle
+
+        if client_goal_handle.accepted:
+            self.get_logger().error('Navigation goal accepted!!')
+
+            result_future = client_goal_handle.get_result_async()
+
+            rclpy.spin_until_future_complete(self, result_future)
+            result = result_future.result()
+
+            return result.status
+        else:
+            return 2 # goal cancelled
+
+
 
 class DockingAction(Node):
     def __init__(self):
@@ -29,6 +81,8 @@ class DockingAction(Node):
         dock_msg = DockRobot.Goal()
         dock_msg.use_dock_id = True
         dock_msg.dock_id = dockId
+        dock_msg.max_staging_time = 1000.0
+        dock_msg.navigate_to_staging_pose = False
 
         if not self._action_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error('Action server not available!')
@@ -63,11 +117,22 @@ class DockingAction(Node):
 
 app = FastAPI()
 
+# mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Setup Jinja2 template engine
+templates = Jinja2Templates(directory="templates")
+
 rclpy.init()
 
 # Create a single global instance to avoid multiple node registration
 map_handler = HandleMap()
 docking_client = DockingAction()
+navigation_goal_client = goalAction()
+
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get('/dock_loop_test')
@@ -88,7 +153,7 @@ def dock_loop_test():
 
         result = docking_client.get_docking_result(docking_request_future)
         if result == 4:
-            time.sleep(8)
+            time.sleep(11)
             change_dock += 1
             docking_client.get_logger().info("Docking SUCCESSFUL  :)")
         elif result == 3:
@@ -103,16 +168,26 @@ def dock_loop_test():
 def cancel_dock_goal():
     global docking_request_future
     goal_handle = docking_request_future.result()
-    cancel_dock_future = goal_handle.cancel_docking_goal()
+    cancel_dock_future = goal_handle.cancel_goal_async()
     rclpy.spin_until_future_complete(docking_client, cancel_dock_future)
     return {"data": "Dock cancelled !!!"}
         
 
 @app.get('/test_dock1')
-def docking():
-    future = docking_client.send_docking_goal("test_dock2")
-    rclpy.spin_until_future_complete(docking_client, future)
-    return {"data": "Dock goal sent!!"}
+async def docking():
+    # first send staging pose goal
+    goal_req_future = navigation_goal_client.send_goal()
+    result_code = navigation_goal_client.get_goal_result(goal_req_future)
+
+    if result_code == 4:
+        navigation_goal_client.get_logger().error('Successfully reached staging pose.')
+        # some delay
+        await asyncio.sleep(2.0)
+
+        #sending dock request
+        future = docking_client.send_docking_goal("test_dock1")
+        rclpy.spin_until_future_complete(docking_client, future)
+        return {"data": "Dock goal sent!!"}
 
 @app.get('/save_map')
 async def save_map():
