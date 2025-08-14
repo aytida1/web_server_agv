@@ -6,9 +6,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from nav2_msgs.action import DockRobot, UndockRobot, NavigateToPose
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
+from tf2_ros.buffer import Buffer
+from tf2_ros import TransformException
+from tf2_ros.transform_listener import TransformListener
+
 from typing import Any
 import time
+import math
 
 from map import HandleMap
 
@@ -35,12 +40,12 @@ class goalAction(Node):
         my_pose = PoseStamped()
         my_pose.header.stamp = self.get_clock().now().to_msg()
         my_pose.header.frame_id = "map"
-        my_pose.pose.position.x = 0.976
-        my_pose.pose.position.y = -0.004
+        my_pose.pose.position.x = 1.038
+        my_pose.pose.position.y = 0.04
         my_pose.pose.orientation.x = 0.0
         my_pose.pose.orientation.y = -1.0
         my_pose.pose.orientation.z = 0.0
-        my_pose.pose.orientation.w = 0.0318
+        my_pose.pose.orientation.w = 0.0058
         
         goal_msg.pose = my_pose
         goal_msg.behavior_tree = ""
@@ -76,6 +81,16 @@ class DockingAction(Node):
             DockRobot,
             '/agv1/dock_robot'
         )
+
+        self.cmd_vel_pub = self.create_publisher(
+            Twist,
+            "agv1/cmd_vel", 
+            10
+        )
+
+        # for getting transform
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
     
     def send_docking_goal(self, dockId:str):
         dock_msg = DockRobot.Goal()
@@ -89,12 +104,13 @@ class DockingAction(Node):
             return None
         
         dock_request_future = self._action_client.send_goal_async(dock_msg)
+        rclpy.spin_until_future_complete(self, dock_request_future)
         return dock_request_future
     
     # this will return dock goal result STATUS
     def get_docking_result(self, future):
         #  check if goal accepted or not
-        rclpy.spin_until_future_complete(self, future)
+        
         dock_goal_handle = future.result()   # Now this is instance of ClientGoalHandle object class
         if not dock_goal_handle.accepted:
             self.get_logger().error("Goal rejected!!!!")
@@ -108,6 +124,45 @@ class DockingAction(Node):
         dock_result = dock_goal_result_future.result()   # this will return {status} property important for us
 
         return dock_result.status    # 2: CANCELLED, 3: ABORTED, 4: SUCCESS
+    
+    def resolve_heading_error(self):
+        desired_yaw = -1.58
+        target_frame = "tag36h11:0"
+        source_frame = "agv1/base_link"
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        while True:
+            # handle not getting transform pose
+            try:
+                t = self.tf_buffer.lookup_transform(
+                    target_frame,
+                    source_frame,
+                    rclpy.time.Time()
+                )
+            except TransformException as ex:
+                self.get_logger().error(f"Could not transform {self.source_frame} and {self.target_frame}: {ex}")
+                stop_cmd = Twist()
+                stop_cmd.linear.x = 0.0
+                stop_cmd.angular.z = 0.0
+                # self.vel_pub.publish(stop_cmd)
+                return 
+            
+            q = t.transform.rotation
+            yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z))
+            print(yaw)
+            error = yaw - desired_yaw
+            if error>-0.01 and error<0.01:
+                self.get_logger().info("done docking !!")
+                break
+            elif error<-0.01:
+                cmd.angular.z = -0.03
+            elif error>0.01:
+                cmd.angular.z = 0.03
+            self.cmd_vel_pub.publish(cmd)
+            time.sleep(0.1)
+                
+
+
     
     def cancel_docking_goal(self):
         cancel_dock_future = self.dock_goal_handle.cancel_goal_async()
@@ -184,10 +239,15 @@ async def docking():
         # some delay
         await asyncio.sleep(2.0)
 
-        #sending dock request
+        # sending dock request
         future = docking_client.send_docking_goal("test_dock1")
-        rclpy.spin_until_future_complete(docking_client, future)
-        return {"data": "Dock goal sent!!"}
+        dock_result_code = docking_client.get_docking_result(future)
+
+        # check for docking succeed
+        if dock_result_code == 4:
+            docking_client.resolve_heading_error()
+        
+        return {"data": "Docking done!!"}
 
 @app.get('/save_map')
 async def save_map():
