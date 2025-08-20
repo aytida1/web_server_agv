@@ -7,6 +7,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from nav2_msgs.action import DockRobot, UndockRobot, NavigateToPose
 from geometry_msgs.msg import PoseStamped, Twist
+from apriltag_msgs.msg import AprilTagDetectionArray
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformException
 from tf2_ros.transform_listener import TransformListener
@@ -18,6 +19,8 @@ import math
 from map import HandleMap
 
 import asyncio
+from threading import Thread
+from rclpy.executors import MultiThreadedExecutor
 from pathlib import Path   # object oriented way of hadling file paths
 
 # global params
@@ -88,9 +91,30 @@ class DockingAction(Node):
             10
         )
 
-        # for getting transform
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.camera_detection_subscriber = self.create_subscription(
+            AprilTagDetectionArray,
+            "/agv1/detections",
+            self.detection_callback,
+            10
+        )
+
+        self.dock_goal_handle = None
+
+        self.heading_timer = None
+
+        self.desired_centre_x = 320.0
+        self.target_frame = "tag36h11:0"
+        self.source_frame = "agv1/base_link"
+        self.centre_x = 0.0
+
+        # # for getting transform
+        # self.tf_buffer = Buffer()
+        # self.tf_listener = TransformListener(self.tf_buffer, self)
+
+    def detection_callback(self, det_msg):
+        if det_msg.detections:
+            self.centre_x = det_msg.detections[0].centre.x  # 640/2 = 320
+
     
     def send_docking_goal(self, dockId:str):
         dock_msg = DockRobot.Goal()
@@ -111,14 +135,14 @@ class DockingAction(Node):
     def get_docking_result(self, future):
         #  check if goal accepted or not
         
-        dock_goal_handle = future.result()   # Now this is instance of ClientGoalHandle object class
-        if not dock_goal_handle.accepted:
+        self.dock_goal_handle = future.result()   # Now this is instance of ClientGoalHandle object class
+        if not self.dock_goal_handle.accepted:
             self.get_logger().error("Goal rejected!!!!")
             return 3 # dock goal aborted
         
         self.get_logger().info("Goal accepted, waiting for result.......")
 
-        dock_goal_result_future = dock_goal_handle.get_result_async()
+        dock_goal_result_future = self.dock_goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, dock_goal_result_future)
 
         dock_result = dock_goal_result_future.result()   # this will return {status} property important for us
@@ -126,45 +150,74 @@ class DockingAction(Node):
         return dock_result.status    # 2: CANCELLED, 3: ABORTED, 4: SUCCESS
     
     def resolve_heading_error(self):
-        desired_yaw = -1.58
-        target_frame = "tag36h11:0"
-        source_frame = "agv1/base_link"
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        while True:
-            # handle not getting transform pose
-            try:
-                t = self.tf_buffer.lookup_transform(
-                    target_frame,
-                    source_frame,
-                    rclpy.time.Time()
-                )
-            except TransformException as ex:
-                self.get_logger().error(f"Could not transform {self.source_frame} and {self.target_frame}: {ex}")
-                stop_cmd = Twist()
-                stop_cmd.linear.x = 0.0
-                stop_cmd.angular.z = 0.0
-                # self.vel_pub.publish(stop_cmd)
-                return 
-            
-            q = t.transform.rotation
-            yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z))
-            print(yaw)
-            error = yaw - desired_yaw
-            if error>-0.01 and error<0.01:
-                self.get_logger().info("done docking !!")
-                break
-            elif error<-0.01:
-                cmd.angular.z = -0.03
-            elif error>0.01:
-                cmd.angular.z = 0.03
-            self.cmd_vel_pub.publish(cmd)
-            time.sleep(0.1)
-                
+        if self.heading_timer is None:
+            self.get_logger().info("Yaw correction started!!")
+            self.heading_timer = self.create_timer(0.1, self.resolve_heading_error_step)
 
+        # more straight forward approach using while loop 
+        # while True:
+        #     error = self.desired_centre_x - self.centre_x
+        #     print(error)
+        #     if abs(error) <= 5.0:
+        #         self.get_logger().info("done docking !! Heading aligned!!")
+        #         self.cmd_vel_pub.publish(Twist())  # stop the robot
+        #         # stop the timer
+        #         # self.heading_timer.cancel()
+        #         # self.heading_timer = None
+        #         break
+
+        #     # angular vel commands
+        #     cmd = Twist()
+        #     cmd.angular.z = 0.03 if error > 5.0 else -0.03
+        #     self.cmd_vel_pub.publish(cmd)
+
+        #     time.sleep(0.1)
+        
+                
+    def resolve_heading_error_step(self):
+        # handle not getting transform pose
+        # try:
+        #     t = self.tf_buffer.lookup_transform(
+        #         self.target_frame,
+        #         self.source_frame,
+        #         rclpy.time.Time()
+        #     )
+        # except TransformException as ex:
+        #     self.get_logger().error(f"Could not transform {self.source_frame} and {self.target_frame}: {ex}")
+        #     stop_cmd = Twist()
+        #     stop_cmd.linear.x = 0.0
+        #     stop_cmd.angular.z = 0.0
+        #     # self.vel_pub.publish(stop_cmd)
+        #     return
+            
+        # x_ = t.transform.translation.y
+
+        # yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y), 1.0 - 2.0*(q.y*q.y + q.z*q.z))
+        # yaw = math.atan2(2 * ((q.y * q.z + q.x * q.w)), q.x**2 + q.y**2 - q.z**2 - q.w**2)
+        # print(x_)
+
+        # error = yaw - self.desired_yaw
+        error = self.desired_centre_x - self.centre_x
+        print(error)
+
+        if abs(error) <= 5.0:
+            self.get_logger().info("done docking !! Heading aligned !!")
+            self.cmd_vel_pub.publish(Twist())  # stop the robot
+            # stop the timer
+            self.heading_timer.cancel()
+            self.heading_timer = None
+            return
+
+        # angular vel commands
+        cmd = Twist()
+        cmd.angular.z = 0.03 if error > 5.0 else -0.03
+        self.cmd_vel_pub.publish(cmd)
 
     
     def cancel_docking_goal(self):
+        if self.dock_goal_handle == None:
+            self.get_logger().error("No active docking action going on!!")
+            return
         cancel_dock_future = self.dock_goal_handle.cancel_goal_async()
         rclpy.spin_until_future_complete(self, cancel_dock_future)
         self.get_logger().info("Dock CANCELLED !!!")
@@ -184,6 +237,14 @@ rclpy.init()
 map_handler = HandleMap()
 docking_client = DockingAction()
 navigation_goal_client = goalAction()
+
+executor = MultiThreadedExecutor()
+executor.add_node(docking_client)
+
+def ros_spin():
+    executor.spin()
+
+Thread(target=ros_spin, daemon=True).start()
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
@@ -245,9 +306,10 @@ async def docking():
 
         # check for docking succeed
         if dock_result_code == 4:
+            time.sleep(1.5)
             docking_client.resolve_heading_error()
+            return {"data": "Docking done!!"}   
         
-        return {"data": "Docking done!!"}
 
 @app.get('/save_map')
 async def save_map():
