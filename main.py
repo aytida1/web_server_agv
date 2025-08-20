@@ -86,6 +86,12 @@ class DockingAction(Node):
             '/agv1/dock_robot'
         )
 
+        self._undock_action_client = ActionClient(
+            self,
+            UndockRobot,
+            '/agv1/undock_robot'
+        )
+
         self.cmd_vel_pub = self.create_publisher(
             Twist,
             "agv1/cmd_vel", 
@@ -116,7 +122,37 @@ class DockingAction(Node):
         if det_msg.detections:
             self.centre_x = det_msg.detections[0].centre.x  # 640/2 = 320
 
-    
+    def undock_from_dock(self, dockType:str):
+        undock_msg = UndockRobot.Goal()
+        undock_msg.dock_type = dockType
+        undock_msg.max_undocking_time = 40.0
+
+        if not self._undock_action_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error('Undocking server not available.')
+            return None
+        
+        undock_request_future = self._undock_action_client.send_goal_async(undock_msg)
+        rclpy.spin_until_future_complete(self, undock_request_future)
+
+        undock_goal_handle = undock_request_future.result()
+
+        if not undock_goal_handle.accepted:
+            self.get_logger().error('Undocking request NOT accepted.')
+
+        self.get_logger().info('Undocking request accepted')
+
+        undock_result_future = undock_goal_handle.get_result_async()
+
+        rclpy.spin_until_future_complete(self, undock_result_future)
+
+        undock_result = undock_result_future.result().result
+
+        if undock_result.success == True:
+            self.get_logger().info('Undocked successful!!')
+            return True
+        else:
+            return False
+
     def send_docking_goal(self, dockId:str):
         dock_msg = DockRobot.Goal()
         dock_msg.use_dock_id = True
@@ -322,6 +358,14 @@ async def docking():
             rclpy.spin_until_future_complete(docking_client, yaw_future)
 
             return {"data": "Docking done!!"}   
+        
+@app.get('/undock')
+async def undock():
+    done_undock = docking_client.undock_from_dock("office_dock1")
+    if done_undock:
+        return {"data": "Undocking done!!"}
+    else:
+        return {"data": "Undocking NOT done!!!!"}
         
 
 @app.get('/save_map')
