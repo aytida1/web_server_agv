@@ -18,6 +18,7 @@ import math
 
 from map import HandleMap
 
+from rclpy.task import Future
 import asyncio
 from threading import Thread
 from rclpy.executors import MultiThreadedExecutor
@@ -152,7 +153,14 @@ class DockingAction(Node):
     def resolve_heading_error(self):
         if self.heading_timer is None:
             self.get_logger().info("Yaw correction started!!")
+
+            self._yaw_future = Future()  # this is member parameter
+
             self.heading_timer = self.create_timer(0.1, self.resolve_heading_error_step)
+
+            return self._yaw_future
+
+            
 
         # more straight forward approach using while loop 
         # while True:
@@ -198,19 +206,21 @@ class DockingAction(Node):
 
         # error = yaw - self.desired_yaw
         error = self.desired_centre_x - self.centre_x
-        print(error)
 
-        if abs(error) <= 5.0:
+        if abs(error) <= 10.0:
             self.get_logger().info("done docking !! Heading aligned !!")
             self.cmd_vel_pub.publish(Twist())  # stop the robot
             # stop the timer
             self.heading_timer.cancel()
             self.heading_timer = None
+
+            if not self._yaw_future.done():
+                self._yaw_future.set_result(True)
             return
 
         # angular vel commands
         cmd = Twist()
-        cmd.angular.z = 0.03 if error > 5.0 else -0.03
+        cmd.angular.z = 0.03 if error > 10.0 else -0.03
         self.cmd_vel_pub.publish(cmd)
 
     
@@ -238,13 +248,13 @@ map_handler = HandleMap()
 docking_client = DockingAction()
 navigation_goal_client = goalAction()
 
-executor = MultiThreadedExecutor()
-executor.add_node(docking_client)
+# executor = MultiThreadedExecutor()
+# executor.add_node(docking_client)
 
-def ros_spin():
-    executor.spin()
+# def ros_spin():
+#     executor.spin()
 
-Thread(target=ros_spin, daemon=True).start()
+# Thread(target=ros_spin, daemon=True).start()
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
@@ -307,7 +317,10 @@ async def docking():
         # check for docking succeed
         if dock_result_code == 4:
             time.sleep(1.5)
-            docking_client.resolve_heading_error()
+
+            yaw_future = docking_client.resolve_heading_error()
+            rclpy.spin_until_future_complete(docking_client, yaw_future)
+
             return {"data": "Docking done!!"}   
         
 
