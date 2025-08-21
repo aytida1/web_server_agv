@@ -12,6 +12,8 @@ from tf2_ros.buffer import Buffer
 from tf2_ros import TransformException
 from tf2_ros.transform_listener import TransformListener
 
+from agv_hardware.action import ControlServo
+
 from typing import Any
 import time
 import math
@@ -269,6 +271,24 @@ class DockingAction(Node):
         self.get_logger().info("Dock CANCELLED !!!")
 
 
+class controlServoActionClient(Node):
+    def __init__(self):
+        super().__init__('control_servo_action_client')
+        self._action_client = ActionClient(self, ControlServo, 'agv1/ControlServo')
+
+    def send_goal(self, lift_and_lock:bool):
+        msg = ControlServo.Goal()
+        msg.lift_and_lock = lift_and_lock
+
+        if not self._action_client.wait_for_server(5):
+            self.get_logger().error("Lift and Lock server not available right now.")
+        
+        future = self._action_client.send_goal_async(msg)
+        rclpy.spin_until_future_complete(self, future)
+
+        return 
+
+
 app = FastAPI()
 
 # mount static files
@@ -283,6 +303,7 @@ rclpy.init()
 map_handler = HandleMap()
 docking_client = DockingAction()
 navigation_goal_client = goalAction()
+control_servo = controlServoActionClient()
 
 # executor = MultiThreadedExecutor()
 # executor.add_node(docking_client)
@@ -366,6 +387,14 @@ async def undock():
         return {"data": "Undocking done!!"}
     else:
         return {"data": "Undocking NOT done!!!!"}
+    
+@app.get('/lift_and_lock')
+async def lift_and_lock(lift_and_lock: bool=True):
+    control_servo.send_goal(lift_and_lock)
+    if lift_and_lock == True:
+        return {"data": "lifted up and locked!!"}
+    else:
+        return {"data": "unlocked and lifted down!!"}
         
 
 @app.get('/save_map')
